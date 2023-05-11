@@ -1,0 +1,472 @@
+Description: "Launch EC2 Instance, VPC, Public & Private subnets on multiple AZ & configure MySql and deploy open source dotnet application nopCommerce"
+
+
+Resources:
+  nopKeyPair:
+    Type: 'AWS::EC2::KeyPair'
+    Properties:
+      KeyName: nop-key-pair
+
+
+  ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http, https, ssh globally
+      VpcId: !Ref vpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref instanceType
+      ImageId: !Ref ImageId
+      KeyName: !Ref nopKeyPair
+      BlockDeviceMappings: 
+      - DeviceName: "/dev/sda1"
+        Ebs: 
+          VolumeType: "gp3"
+          Iops: !Ref instanceVolumeIops
+          DeleteOnTermination: true
+          VolumeSize: !Ref instanceVolumeSize
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref ec2SecurityGroup
+          SubnetId: !Ref subnetId
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          #
+          # Purpose: Install nop on Linux
+          # C: Tamim Arefin Anik
+          # E: tamimarefinanik@gmail.com
+          # D: 2022-11-08 10-07
+          # 
+          sudo echo "Started: `date`" >> /hola.txt
+          sudo apt update
+
+          sudo wget https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+
+          sudo apt-get update
+
+          yes | sudo apt install aspnetcore-runtime-6.0=6.0.8-1 dotnet-apphost-pack-6.0=6.0.8-1 dotnet-host=6.0.8-1 dotnet-hostfxr-6.0=6.0.8-1 dotnet-runtime-6.0=6.0.8-1 dotnet-sdk-6.0=6.0.400-1 dotnet-targeting-pack-6.0=6.0.8-1
+
+          sudo apt-get install nginx curl wget -y
+          sudo rm /etc/nginx/sites-enabled/default
+
+          sudo cat <<EOF > /etc/nginx/conf.d/timeout.conf
+          send_timeout 3999;
+          proxy_read_timeout 3999;
+          proxy_connect_timeout 3999;
+          proxy_send_timeout 3999;
+          EOF
+
+          sudo cat <<EOF > /etc/nginx/sites-enabled/default_nop_commerce.conf
+          # Default server configuration
+          #
+          upstream backend {
+            server 127.0.0.1:5000 fail_timeout=100s;
+          }
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+
+              server_name _;
+
+              error_page 502 /wait.html;
+              location = /wait.html {
+                root /var/www/html;
+                internal;
+              }
+
+              location / {
+                proxy_pass http://backend;
+                proxy_http_version 1.1;
+                proxy_set_header   Upgrade \$http_upgrade;
+                proxy_set_header   Connection keep-alive;
+                proxy_set_header   Host \$host;
+                proxy_cache_bypass \$http_upgrade;
+                proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header   X-Forwarded-Proto \$scheme;
+                proxy_headers_hash_max_size 512;
+                proxy_headers_hash_bucket_size 128;
+              }
+          }
+          EOF
+
+          sudo cat <<EOF > /var/www/html/wait.html
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>NopCommerce Installation</title>
+            <meta name="description" content="Please wait completing nopCommerce installation.">
+            <meta name="author" content="Tamim Arefin Anik">
+            <meta property="og:title" content="NopCommerce Installation">
+            <meta property="og:type" content="website">
+            <meta property="og:description" content="Please wait completing nopCommerce installation.">
+          </head>
+          <body>
+              <h1 align="center">Please wait....</h1>
+              <img align="center" src="https://www.nopcommerce.com/Themes/OfficialSite/Content/images/logo.svg" alt="nopCommerce">
+              <script>
+                  document.addEventListener("DOMContentLoaded", function(event) {
+                      setTimeout(
+                          function() {
+                              console.log("Please wait...");
+                              let travelTo = "/";
+                              window.location.href = travelTo;
+                          }, 9000
+                      );
+                  });
+              </script>
+          </body>
+          </html>
+          EOF
+
+          sudo service nginx restart
+
+          sudo mkdir /opt/mysqlbundle
+          sudo cd /opt/mysqlbundle
+          sudo wget https://downloads.mysql.com/archives/get/p/23/file/mysql-server_8.0.27-1ubuntu21.10_amd64.deb-bundle.tar
+          sudo wget http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+          sudo apt install ./libssl1.1_1.1.1f-1ubuntu2_amd64.deb -y
+          sudo tar xvf *.tar
+          sudo debconf-set-selections <<< "mysql-community-server mysql-community-server/root-pass password ${mysqlRootPassword}"
+          sudo debconf-set-selections <<< "mysql-community-server mysql-community-server/re-root-pass password ${mysqlRootPassword}"
+          sudo debconf-set-selections <<< "mysql-community-server mysql-server/default-auth-override select Use Legacy Authentication Method (Retain MySQL 5.x Compatibility)"
+          sudo DEBIAN_FRONTEND=noninteractive apt install ./*.deb -y
+          sudo systemctl enable mysql
+          sudo cat <<EOF > /etc/mysql/mysql.conf.d/custom_mysqld.cnf
+          [mysqld]
+          interactive_timeout=1800
+          wait_timeout=1800
+          mysqlx_read_timeout=1800
+          mysqlx_write_timeout=1800
+          connect_timeout=1800
+          EOF
+
+          sudo service mysql start
+          
+          sudo mysql -h 127.0.0.1 -u root -p${mysqlRootPassword} -e "CREATE DATABASE ${mysqlNopCommerceDB} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          sudo mysql -h 127.0.0.1 -u root -p${mysqlRootPassword} -e "CREATE USER '${mysqlNopCommerceDBUser}'@'localhost' IDENTIFIED WITH mysql_native_password BY '${mysqlNopCommerceDBUserPassword}';"
+          sudo mysql -h 127.0.0.1 -u root -p${mysqlRootPassword} -e "GRANT ALL PRIVILEGES ON ${mysqlNopCommerceDB}.* To '${mysqlNopCommerceDBUser}'@'localhost';FLUSH PRIVILEGES;"
+
+
+          sudo mkdir /var/www/nopCommerce
+          cd /var/www/nopCommerce
+
+          sudo wget https://github.com/nopSolutions/nopCommerce/releases/download/release-4.50.3/nopCommerce_4.50.3_NoSource_linux_x64.zip
+
+          sudo apt-get -y install unzip zip libgdiplus 
+
+          sudo unzip nopCommerce_4.50.3_NoSource_linux_x64.zip
+
+          sudo mkdir bin
+          sudo mkdir logs
+
+          sudo chgrp -R www-data /var/www/nopCommerce
+          sudo chown -R www-data /var/www/nopCommerce
+
+          sudo cat <<EOF > /etc/systemd/system/nopcommerce.service
+          [Unit]
+          Description=Example nopCommerce app running on ubuntu
+
+          [Service]
+          WorkingDirectory=/var/www/nopCommerce
+          ExecStart=/usr/bin/dotnet /var/www/nopCommerce/Nop.Web.dll
+          Restart=always
+          # Restart service after 10 seconds if the dotnet service crashes:
+          RestartSec=10
+          KillSignal=SIGINT
+          SyslogIdentifier=nopCommerce-log
+          User=www-data
+          Environment=ASPNETCORE_ENVIRONMENT=Production
+          Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          sudo systemctl start nopcommerce
+          sudo systemctl enable nopcommerce
+
+
+          curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "SUCCESS", "Reason" : "Configuration Complete","UniqueId" : "NOP", "Data" : "Application has completed configuration."}' "${waitHandleForEC2}"
+          sudo echo "Finished: `date`" >> /hola.txt
+
+      Tags:
+        - Key: Name
+          Value: !Ref instanceName
+
+  EC2InstanceEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref ec2Instance
+      Tags:
+        - Key: Name
+          Value: Join ['-', ['eip-for-ec2-created-by-cf', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+
+  waitHandleForEC2:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    Properties: {}
+
+  waitConditionForEC2:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: ec2Instance
+    Properties:
+      Handle:
+        Ref: waitHandleForEC2
+      Timeout: '4500'
+
+Parameters:
+  instanceName:
+    Description: Give the name of the instance.
+    Type: String
+    Default: nop-instance
+  instanceType:
+    Description: WebServer EC2 instance type. For better performance, select small or above.
+    Type: String
+    Default: t2.medium
+    AllowedValues:
+    - t2.small
+    - t2.medium
+    - t2.large
+    - m2.xlarge
+    - m2.2xlarge
+    - m2.4xlarge
+    - m3.medium
+    - m3.large
+    - m3.xlarge
+    - m3.2xlarge
+    - m4.large
+    - m4.xlarge
+    - m4.2xlarge
+    - m4.4xlarge
+    - m4.10xlarge
+    - c1.medium
+    - c1.xlarge
+    - c3.large
+    - c3.xlarge
+    - c3.2xlarge
+    - c3.4xlarge
+    - c3.8xlarge
+    - c4.large
+    - c4.xlarge
+    - c4.2xlarge
+    - c4.4xlarge
+    - c4.8xlarge
+    - g2.2xlarge
+    - g2.8xlarge
+    - r3.large
+    - r3.xlarge
+    - r3.2xlarge
+    - r3.4xlarge
+    - r3.8xlarge
+    - i2.xlarge
+    - i2.2xlarge
+    - i2.4xlarge
+    - i2.8xlarge
+    - d2.xlarge
+    - d2.2xlarge
+    - d2.4xlarge
+    - d2.8xlarge
+    - hi1.4xlarge
+    - hs1.8xlarge
+    - cr1.8xlarge
+    - cc2.8xlarge
+    - cg1.4xlarge
+
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/20221201/amd64/hvm/ebs-gp2/ami-id
+  
+  # keyName:
+  #   Description: What is the name of the keypair to access the instance?
+  #   # Type: String
+  #   Type: AWS::EC2::KeyPair::KeyName
+
+  instanceVolumeSize:
+    Description: Size of the volume.
+    Type: Number
+    Default: 20
+  instanceVolumeIops:
+    Description: IOPS of the volume.
+    Type: Number
+    Default: 500
+
+  vpcId:
+    Description: vpcId of your existing Virtual Private Cloud (VPC).
+    ConstraintDescription: must be the VPC Id of an existing Virtual Private Cloud.
+    # Type: String
+    Type: AWS::EC2::VPC::Id
+  subnetId:
+    Description: The SubnetId in your Virtual Private Cloud (VPC)
+    ConstraintDescription: Subnet should be residing in the selected Virtual Private Cloud.
+    # Type: String
+    Type: AWS::EC2::Subnet::Id
+
+  mysqlNopCommerceDB:
+    Description: "The name of the MySQL Database which will be used to install nopCommerce."
+    ConstraintDescription: "Give the database name from 3-15 chars starting with any English letters except number or sysmbol. Database name can contain number but not in the begining. Also give lowercase chars."
+    Type: String
+    Default: "nopcommerce"
+    MinLength: 3
+    MaxLength: 15
+    AllowedPattern: "[a-z][a-z0-9]+$"
+
+  mysqlRootPassword:
+    Description: "MySQL root Password."
+    ConstraintDescription: "Give the password from 8-25 chars starting with any English letters and numbers in any case. Also may contain `*,.,_`"
+    Type: String
+    Default: "nopCommerce"
+    MinLength: 8
+    MaxLength: 25
+    AllowedPattern: "^[a-zA-Z0-9_*.,]*$"
+
+  mysqlNopCommerceDBUser:
+    Description: "The name of the user for nopCommerce."
+    ConstraintDescription: "Give NOP-Commerce DB users name 3-15 chars and may contain only English alphabets with any case."
+    Type: String
+    Default: "nop"
+    MinLength: 3
+    MaxLength: 15
+    AllowedPattern: "[a-zA-Z]+$"
+  mysqlNopCommerceDBUserPassword:
+    Description: "MySQL NOP User Password."
+    ConstraintDescription: "Give the password from 8-25 chars starting with any English letters and numbers in any case. Also may contain `*,.,_`"
+    Type: String
+    Default: "nopCommerce"
+    MinLength: 6
+    MaxLength: 25
+    AllowedPattern: "^[a-zA-Z0-9_*.]*$"
+  
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Amazon EC2 Configuration"
+        Parameters: 
+          - instanceName
+          - instanceType
+          - instanceVolumeSize
+          - instanceVolumeIops
+
+      - 
+        Label: 
+          default: "Network Configuration"
+        Parameters: 
+          - vpcId
+          - subnetId
+
+      -
+        Label:
+          default: "MySQL Database information for nop-commerce."
+        Parameters:
+          - mysqlNopCommerceDB
+          - mysqlNopCommerceDBUser
+          - mysqlNopCommerceDBUserPassword
+          - mysqlRootPassword
+
+    ParameterLabels: 
+      - vpcId: 
+          default: "Which VPC should this be deployed to?"
+      - subnetId:
+          default: "Subnet should be in the selected VPC !"
+
+Outputs:
+  
+  dataFromEC2:
+    Value:
+      Fn::GetAtt:
+      - waitConditionForEC2
+      - Data
+    Description: "Collected data from the EC2."
+
+  Ec2Instance:
+    Value:
+      Ref: ec2Instance
+    Description: "Ec2 instance ID."
+
+  PublicIp:
+    Value:
+      Fn::GetAtt:
+      - ec2Instance
+      - PublicIp
+    Description: "Server's PublicIp Address."
+
+  KeyPair:
+    Value: !Join [ "/", ["/ec2/keypair", !GetAtt nopKeyPair.KeyPairId]]
+    Description: A keypair is created and attached it with the EC2 instance. To retrieve the private key for accessing the instance you need to find the 'AWS Systems Manager>Parameter Store' with the keypair having '/ec2/keypair/<value-of-this-output>''
+
+  SSHUser:
+    Value: "ubuntu"
+    Description: "Server's ssh user to connect."
+
+  SSHPort:
+    Value: 22
+    Description: "Server's SSH Port."
+
+
+  nopCommerceAccessURL:
+    Value:
+      Fn::Join:
+      - ''
+      - - http://
+        - Fn::GetAtt:
+          - ec2Instance
+          - PublicIp
+        - "/"
+    Description: "nopCommerce Access URL"
+
+  MySQLRootUser:
+    Value: "root"
+    Description: "The MySQL username to use when you start the setup your nopCommerce."
+
+  MySQLRootPassword:
+    Value:
+      Ref: mysqlRootPassword
+    Description: "The MySQL root users password to use when you start the setup your nopCommerce."
+
+  MySQLNopCommerceDBUser:
+    Value: 
+      Ref: mysqlNopCommerceDBUser
+    Description: "The MySQL username to use when you start the setup your nopCommerce."
+
+  MySQLNopCommerceDBUserPassword:
+    Value:
+      Ref: mysqlNopCommerceDBUserPassword
+    Description: "The MySQL user password to use when you start the setup your nopCommerce from MySQLNopCommerceDBUser."
+
+  MySQLNopCommerceDB:
+    Value:
+      Ref: mysqlNopCommerceDB
+    Description: "The MySQL root users password to use when you start the setup your nopCommerce."
+
+  MySQLDatabase:
+    Value:
+      Ref: mysqlNopCommerceDB
+    Description: "The MySQL Database."
+
+  MySQLHost:
+    Value: "127.0.0.1"
+    Description: "The MySQL host."
+  MySQLPort:
+    Value: "3306"
+    Description: "The MySQL port."
