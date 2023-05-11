@@ -1,4 +1,4 @@
-Description: "Launch EC2 Instance, VPC, Public & Private subnets on multiple AZ & configure MySql and deploy open source dotnet application nopCommerce"
+Description: "Launch EC2 Instance, VPC, Public subnets configure MySql and deploy open source dotnet application nopCommerce"
 
 
 Resources:
